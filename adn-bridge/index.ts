@@ -2,14 +2,16 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
-import { BindingStore } from "./src/store.js";
-import { ensureRepo } from "./src/repo.js";
+import { BindingStore, type TopicBinding } from "./src/store.js";
+import { ensureRepo, extractGitHost } from "./src/repo.js";
 
 // ─── Config ───
 
 interface AdnBridgeConfig {
   reposDir?: string;
   defaultRuntime?: string;
+  defaultGitHost?: string;  // e.g., "gitlab.company.com"
+  gitHosts?: string[];      // e.g., ["github.com", "gitlab.company.com"]
 }
 
 function resolveReposDir(cfg: AdnBridgeConfig): string {
@@ -20,20 +22,33 @@ function resolveDefaultRuntime(cfg: AdnBridgeConfig): string {
   return cfg.defaultRuntime ?? "claude";
 }
 
+function resolveDefaultGitHost(cfg: AdnBridgeConfig): string {
+  return cfg.defaultGitHost ?? "github.com";
+}
+
+function resolveGitHosts(cfg: AdnBridgeConfig): string[] {
+  if (cfg.gitHosts && cfg.gitHosts.length > 0) {
+    return cfg.gitHosts;
+  }
+  const hosts = ["github.com"];
+  const defaultHost = cfg.defaultGitHost ?? "";
+  if (defaultHost && !hosts.includes(defaultHost)) {
+    hosts.push(defaultHost);
+  }
+  return hosts;
+}
+
 // ─── Runtime detection ───
 
 const RUNTIME_LABELS: Record<string, string> = {
   claude: "🟣 Claude Code",
   codex: "🟢 Codex",
+  gemini: "🔴 Gemini CLI",
   opencode: "🔵 OpenCode",
   pi: "🟡 Pi",
-  gemini: "🔴 Gemini CLI",
   kimi: "🟠 Kimi",
 };
 
-/**
- * Detect available runtimes: intersection of acp.allowedAgents and locally installed binaries.
- */
 function detectAvailableRuntimes(config: any): string[] {
   const allowed: string[] = config?.acp?.allowedAgents ?? ["claude", "codex"];
   const available: string[] = [];
@@ -50,11 +65,6 @@ function detectAvailableRuntimes(config: any): string[] {
 
 // ─── Telegram helpers ───
 
-/**
- * Extract chatId and threadId from plugin command context.
- * ctx.from format: "telegram:group:-1003833456438:topic:4"
- * ctx.messageThreadId: 4
- */
 function extractTopicInfo(ctx: any): { chatId: string; threadId: string; topicKey: string } | null {
   const from = ctx.from ?? "";
   const messageThreadId = ctx.messageThreadId;
@@ -69,10 +79,6 @@ function extractTopicInfo(ctx: any): { chatId: string; threadId: string; topicKe
   return null;
 }
 
-/**
- * Send a message with inline keyboard buttons via Telegram Bot API.
- * Uses switch_inline_query_current_chat so clicking a button fills the command in the input box.
- */
 async function sendTelegramButtons(params: {
   botToken: string;
   chatId: string;
@@ -109,19 +115,20 @@ interface CheckResult {
 
 async function runPreflightChecks(config: any): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
+  const cfg = config as AdnBridgeConfig;
 
   // 1. ACP enabled
   if (config?.acp?.enabled) {
     results.push({ ok: true, message: "✅ ACP 已启用" });
   } else {
-    results.push({ ok: false, message: "❌ ACP 未启用\n修复: openclaw config set acp.enabled true" });
+    results.push({ ok: false, message: "❌ ACP 未启用\n修复：openclaw config set acp.enabled true" });
   }
 
   // 2. ACP backend configured
   if (config?.acp?.backend) {
     results.push({ ok: true, message: `✅ ACP backend: ${config.acp.backend}` });
   } else {
-    results.push({ ok: false, message: "❌ ACP backend 未配置\n修复: openclaw config set acp.backend acpx" });
+    results.push({ ok: false, message: "❌ ACP backend 未配置\n修复：openclaw config set acp.backend acpx" });
   }
 
   // 3. acpx plugin enabled
@@ -129,7 +136,7 @@ async function runPreflightChecks(config: any): Promise<CheckResult[]> {
   if (acpxEntry?.enabled !== false) {
     results.push({ ok: true, message: "✅ acpx 插件已启用" });
   } else {
-    results.push({ ok: false, message: "❌ acpx 插件未启用\n修复: openclaw plugins enable acpx" });
+    results.push({ ok: false, message: "❌ acpx 插件未启用\n修复：openclaw plugins enable acpx" });
   }
 
   // 4. Git installed
@@ -137,34 +144,40 @@ async function runPreflightChecks(config: any): Promise<CheckResult[]> {
     execFileSync("git", ["--version"], { stdio: "ignore" });
     results.push({ ok: true, message: "✅ Git 已安装" });
   } catch {
-    results.push({ ok: false, message: "❌ Git 未安装\n修复: sudo apt install git" });
+    results.push({ ok: false, message: "❌ Git 未安装\n修复：sudo apt install git" });
   }
 
-  // 5. SSH key configured for GitHub
-  try {
-    execFileSync("ssh", ["-T", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", "git@github.com"], {
-      stdio: "ignore",
-      timeout: 10_000,
-    });
-    results.push({ ok: true, message: "✅ GitHub SSH 已配置" });
-  } catch (e: any) {
-    // ssh -T git@github.com exits with code 1 on success ("Hi user! ... does not provide shell access")
-    if (e.status === 1) {
-      results.push({ ok: true, message: "✅ GitHub SSH 已配置" });
-    } else {
-      results.push({ ok: false, message: "❌ GitHub SSH 未配置\n修复: ssh-keygen -t ed25519 然后添加到 GitHub" });
+  // 5. SSH key configured for each Git host
+  const gitHosts = resolveGitHosts(cfg);
+  for (const host of gitHosts) {
+    try {
+      execFileSync("ssh", ["-T", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", `git@${host}`], {
+        stdio: "ignore",
+        timeout: 10_000,
+      });
+      results.push({ ok: true, message: `✅ ${host} SSH 已配置` });
+    } catch (e: any) {
+      if (e.status === 1) {
+        results.push({ ok: true, message: `✅ ${host} SSH 已配置` });
+      } else {
+        const keyFile = `~/.ssh/id_ed25519_${host.replace(/\./g, "_")}`;
+        results.push({
+          ok: false,
+          message: `❌ ${host} SSH 未配置\n修复：ssh-keygen -t ed25519 -C "your@email" -f ${keyFile}\n然后添加到 ${host} 的 SSH keys 设置`,
+        });
+      }
     }
   }
 
-  // 6. Runtime detection — show each one, but only fail if none of the required ones are installed
+  // 6. Runtime detection
   const REQUIRED_RUNTIMES = ["claude", "codex", "gemini"];
   const ALL_RUNTIMES: Array<{ id: string; label: string; install: string }> = [
     { id: "claude", label: "Claude Code", install: "npm i -g @anthropics/claude-code" },
     { id: "codex", label: "Codex", install: "npm i -g @openai/codex" },
-    { id: "gemini", label: "Gemini CLI", install: "npm i -g @anthropic-ai/gemini-cli 或参考官方文档" },
+    { id: "gemini", label: "Gemini CLI", install: "参考官方文档安装" },
     { id: "opencode", label: "OpenCode", install: "npm i -g opencode" },
     { id: "pi", label: "Pi", install: "npm i -g @mariozechner/pi-coding-agent" },
-    { id: "kimi", label: "Kimi", install: "go install github.com/anthropic-ai/kimi@latest" },
+    { id: "kimi", label: "Kimi", install: "参考官方文档安装" },
   ];
 
   let hasRequiredRuntime = false;
@@ -179,7 +192,6 @@ async function runPreflightChecks(config: any): Promise<CheckResult[]> {
       results.push({ ok: true, message: `✅ ${rt.label} 已安装` });
       if (REQUIRED_RUNTIMES.includes(rt.id)) hasRequiredRuntime = true;
     } else {
-      // Not installed — only informational, not a blocker per se
       results.push({ ok: true, message: `⬜ ${rt.label} 未安装 (${rt.install})` });
     }
   }
@@ -213,7 +225,7 @@ export default function register(api: OpenClawPluginApi) {
 
   api.registerCommand({
     name: "adn_bridge",
-    description: "绑定 Telegram topic 到 coding repo，一键启动 ACP coding session。",
+    description: "绑定 Telegram topic 到 Git repo（GitHub/GitLab/私有），一键启动 ACP coding session。",
     acceptsArgs: true,
     handler: async (ctx) => {
       const args = ctx.args?.trim() ?? "";
@@ -229,8 +241,10 @@ export default function register(api: OpenClawPluginApi) {
           text: [
             "🛠️ ADN Bridge 命令：",
             "",
-            "/adn_bridge bind <org/repo> [--runtime claude|codex]",
+            "/adn_bridge bind <repo> [--runtime claude|codex]",
             "  绑定当前 topic 到 repo（自动 clone + 显示启动按钮）",
+            "  支持格式：org/repo, github:org/repo, gitlab:group/project,",
+            "  https://github.com/org/repo, https://gitlab.company.com/g/p",
             "",
             "/adn_bridge unbind",
             "  解绑当前 topic",
@@ -264,24 +278,9 @@ export default function register(api: OpenClawPluginApi) {
 
       // ── bind ──
       if (action === "bind") {
-        // Run preflight checks first
-        const checks = await runPreflightChecks((ctx as any).config);
-        const failures = checks.filter((c) => !c.ok);
-        if (failures.length > 0) {
-          return {
-            text: [
-              "❌ 环境检查未通过，请先修复以下问题：",
-              "",
-              ...failures.map((f) => f.message),
-              "",
-              "修复后重启 gateway 再试。",
-            ].join("\n"),
-          };
-        }
-
         const repoSpec = tokens[1];
         if (!repoSpec) {
-          return { text: "用法：/adn_bridge bind <org/repo>\n例如：/adn_bridge bind guokebang/cc-PhonePilot" };
+          return { text: "用法：/adn_bridge bind <repo>\n例如：/adn_bridge bind guokebang/cc-PhonePilot" };
         }
 
         // Parse optional --runtime flag
@@ -297,20 +296,23 @@ export default function register(api: OpenClawPluginApi) {
         }
 
         const reposDir = resolveReposDir(pluginCfg);
+        const defaultGitHost = resolveDefaultGitHost(pluginCfg);
 
         // Clone if needed
         let repoPath: string;
         let cloned = false;
+        let gitHost: string;
         try {
-          const result = await ensureRepo(reposDir, repoSpec);
+          const result = await ensureRepo(reposDir, repoSpec, defaultGitHost);
           repoPath = result.repoPath;
           cloned = result.cloned;
+          gitHost = result.host;
         } catch (e: any) {
           return { text: `❌ Clone 失败：${e.message ?? e}` };
         }
 
         // Save binding to plugin store
-        const binding = {
+        const binding: TopicBinding = {
           topicKey: topicKey || `manual:${repoSpec}`,
           repo: repoSpec,
           repoPath,
@@ -323,7 +325,8 @@ export default function register(api: OpenClawPluginApi) {
           `✅ 绑定成功！`,
           "",
           `📦 Repo: ${repoSpec}`,
-          `📂 路径: ${repoPath}`,
+          `🌐 Git Host: ${gitHost}`,
+          `📂 路径：${repoPath}`,
           `🤖 Runtime: ${runtime}`,
           cloned ? `📥 已自动 clone` : `📁 使用已有 repo`,
         ];
@@ -386,9 +389,9 @@ export default function register(api: OpenClawPluginApi) {
             `📋 当前 topic 绑定：`,
             "",
             `📦 Repo: ${binding.repo}`,
-            `📂 路径: ${binding.repoPath}`,
+            `📂 路径：${binding.repoPath}`,
             `🤖 Runtime: ${binding.runtime}`,
-            `🕐 绑定时间: ${binding.boundAt}`,
+            `🕐 绑定时间：${binding.boundAt}`,
           ].join("\n"),
         };
       }
@@ -417,7 +420,7 @@ export default function register(api: OpenClawPluginApi) {
         }
         const rt = tokens[1]?.toLowerCase();
         if (rt !== "claude" && rt !== "codex") {
-          return { text: `用法：/adn_bridge runtime <claude|codex>\n当前: ${binding.runtime}` };
+          return { text: `用法：/adn_bridge runtime <claude|codex>\n当前：${binding.runtime}` };
         }
         binding.runtime = rt;
         await store.set(binding);

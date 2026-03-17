@@ -1,7 +1,7 @@
 {
   "id": "adn-bridge",
   "name": "ADN Bridge",
-  "description": "Bind Telegram topics to coding repos. /bridge bind <repo> auto-clones and starts an ACP session.",
+  "description": "Bind Telegram topics to Git repos (GitHub/GitLab/private). Auto-clone and launch ACP coding sessions with one click.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -14,6 +14,15 @@
         "type": "string",
         "enum": ["claude", "codex"],
         "description": "Default coding runtime. Defaults to claude."
+      },
+      "defaultGitHost": {
+        "type": "string",
+        "description": "Default Git host for short repo specs (e.g., 'org/repo'). Use 'github.com' (default) or your private GitLab host like 'gitlab.company.com'."
+      },
+      "gitHosts": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "List of Git hosts to check SSH keys for during preflight. Defaults to ['github.com'] plus defaultGitHost if different."
       }
     }
   },
@@ -25,6 +34,14 @@
     "defaultRuntime": {
       "label": "Default Runtime",
       "help": "Default coding agent (claude or codex)."
+    },
+    "defaultGitHost": {
+      "label": "Default Git Host",
+      "help": "Default Git host for short repo specs like 'org/repo'. Use 'github.com' or your private GitLab like 'gitlab.company.com'."
+    },
+    "gitHosts": {
+      "label": "Git Hosts",
+      "help": "List of Git hosts to check SSH keys for. Defaults to github.com + defaultGitHost."
     }
   }
 }
