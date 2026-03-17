@@ -1,0 +1,30 @@
+{
+  "id": "adn-bridge",
+  "name": "ADN Bridge",
+  "description": "Bind Telegram topics to coding repos. /bridge bind <repo> auto-clones and starts an ACP session.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "reposDir": {
+        "type": "string",
+        "description": "Root directory for cloned repos. Defaults to ~/repos."
+      },
+      "defaultRuntime": {
+        "type": "string",
+        "enum": ["claude", "codex"],
+        "description": "Default coding runtime. Defaults to claude."
+      }
+    }
+  },
+  "uiHints": {
+    "reposDir": {
+      "label": "Repos Directory",
+      "help": "Where to clone repos. Defaults to ~/repos."
+    },
+    "defaultRuntime": {
+      "label": "Default Runtime",
+      "help": "Default coding agent (claude or codex)."
+    }
+  }
+}
