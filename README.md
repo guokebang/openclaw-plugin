@@ -6,17 +6,20 @@ OpenClaw 插件集合，每个子目录是一个独立插件。
 
 | 插件 | 说明 | 状态 |
 |---|---|---|
-| [adn-bridge](./adn-bridge/) | Telegram Topic ↔ GitHub Repo 绑定，一键启动 ACP coding session | ✅ 可用 |
+| [adn-bridge](./adn-bridge/) | Telegram Topic ↔ Git Repo 绑定，一键启动 ACP coding session | ✅ 可用 |
+| [adn-backup](./adn-backup/) | OpenClaw 配置、插件、工作区备份与恢复 | ✅ 可用 |
 
 ## 安装方式
 
 ```bash
 # 安装单个插件
 openclaw plugins install ./adn-bridge
+openclaw plugins install ./adn-backup
 
 # 或手动复制到 extensions 目录
 cp -r adn-bridge ~/.openclaw/extensions/
-openclaw plugins enable adn-bridge
+cp -r adn-backup ~/.openclaw/extensions/
+openclaw plugins enable adn-bridge adn-backup
 openclaw gateway restart
 ```
 
