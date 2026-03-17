@@ -1,0 +1,21 @@
+{
+  "id": "adn-backup",
+  "name": "ADN Backup",
+  "description": "Backup and restore OpenClaw configuration, plugins, workspace, and sessions.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "backupDir": {
+        "type": "string",
+        "description": "Directory to store backup files. Defaults to ~/.openclaw/backups/"
+      }
+    }
+  },
+  "uiHints": {
+    "backupDir": {
+      "label": "Backup Directory",
+      "help": "Where to store backup archives. Defaults to ~/.openclaw/backups/"
+    }
+  }
+}
