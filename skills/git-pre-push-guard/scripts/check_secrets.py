@@ -307,6 +307,11 @@ IGNORE_PATTERNS = {
     '.idea', '.vscode', '.DS_Store',
 }
 
+# 跳过检测脚本自身（避免误报）
+IGNORE_FILES = {
+    'check_secrets.py', 'pre_push_check.py', 'pre-push-hook',
+}
+
 IGNORE_EXTENSIONS = {'.lock', '.min.js', '.min.css', '.map', '.svg', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.pdf', '.zip', '.tar', '.gz'}
 
 # ─── 假阳性关键词 ───
@@ -343,6 +348,9 @@ def should_skip(filepath: str) -> bool:
     for p in parts:
         if p in IGNORE_PATTERNS:
             return True
+    # 跳过检测脚本自身
+    if Path(filepath).name in IGNORE_FILES:
+        return True
     if Path(filepath).suffix in IGNORE_EXTENSIONS:
         return True
     return False
@@ -547,7 +555,8 @@ def main():
             title = f"最近 {args.commits} 次提交扫描"
         print_report(filtered, title)
 
-    sys.exit(1 if findings else 0)
+    # 退出码：只根据过滤后的结果决定
+    sys.exit(1 if filtered else 0)
 
 
 if __name__ == '__main__':
