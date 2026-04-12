@@ -21,6 +21,10 @@ API_SECRET="${API_SECRET:-}"
 NEKO_WEB_PORT="${NEKO_WEB_PORT:-3000}"
 NEKO_WS_PORT="${NEKO_WS_PORT:-3002}"
 
+# 订阅配置
+SUB_URL="${SUB_URL:-}"
+SUB_INTERVAL="${SUB_INTERVAL:-86400}"  # 默认 24 小时更新一次
+
 MODE=""
 UPDATE_MIHOMO=false
 UPDATE_NEKO=false
@@ -61,6 +65,14 @@ while [[ $# -gt 0 ]]; do
       echo "  --update-mihomo       仅更新 Mihomo"
       echo "  --update-neko         仅更新 Neko"
       echo "  --help, -h            显示帮助"
+      echo ""
+      echo "环境变量:"
+      echo "  SUB_URL              订阅链接 (可选)"
+      echo "  SUB_INTERVAL         订阅更新间隔 (秒，默认 86400=24小时)"
+      echo "  LAN_IFACE            网卡名称 (默认自动检测)"
+      echo "  HTTP_PORT            HTTP 代理端口 (默认 7890)"
+      echo "  API_PORT             Mihomo API 端口 (默认 9090)"
+      echo "  NEKO_WEB_PORT        Neko Web 端口 (默认 3000)"
       exit 0
       ;;
     *) echo "未知参数: $1"; exit 1 ;;
@@ -187,7 +199,186 @@ enable_bypass() {
   echo "  上游网关: $UPSTREAM_GW"
   echo ""
 
-  echo "[2/3] 写入配置..."
+  # 如果 config.yaml 不存在，创建它
+  if [[ ! -f "${MIHOMO_DIR}/config.yaml" ]]; then
+    echo "[1.5/3] 创建 Mihomo 配置..."
+    if [[ -z "${API_SECRET}" ]]; then
+      API_SECRET="$(openssl rand -hex 16)"
+    fi
+
+    UPSTREAM_DNS="${UPSTREAM_GW}"
+
+    # 生成订阅相关配置
+    PROXIES_CONFIG=""
+    PROXY_GROUPS_CONFIG=""
+    PROXY_PROVIDERS=""
+
+    if [[ -n "$SUB_URL" ]]; then
+      PROXIES_CONFIG="
+# 代理节点由订阅自动更新
+proxies: []
+"
+      PROXY_GROUPS_CONFIG='
+proxy-groups:
+  - name: "AUTO"
+    type: url-test
+    proxies:
+      - "DIRECT"
+    url: "http://www.gstatic.com/generate_204"
+    interval: 300
+    tolerance: 50
+    use:
+      - "Subscription"
+
+  - name: "PROXY"
+    type: select
+    proxies:
+      - "AUTO"
+      - "DIRECT"
+    use:
+      - "Subscription"
+'
+      PROXY_PROVIDERS="
+proxy-providers:
+  Subscription:
+    type: http
+    url: \"${SUB_URL}\"
+    interval: ${SUB_INTERVAL}
+    health-check:
+      enable: true
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+    proxy: DIRECT
+"
+    else
+      PROXIES_CONFIG='
+proxies:
+  - { name: "your-node", type: direct }
+'
+      PROXY_GROUPS_CONFIG='
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - "your-node"
+      - "DIRECT"
+'
+    fi
+
+    cat > "${MIHOMO_DIR}/config.yaml" <<EOF
+# ── 基础 ──
+port: ${HTTP_PORT}
+socks-port: ${SOCKS_PORT}
+redir-port: ${REDIR_PORT}
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: info
+ipv6: false
+unified-delay: true
+tcp-concurrent: true
+find-process-mode: off
+
+# ── 外部控制 (Neko Master 连接用) ──
+external-controller: 0.0.0.0:${API_PORT}
+secret: "${API_SECRET}"
+
+# ── DNS ──
+dns:
+  enable: true
+  listen: 0.0.0.0:${DNS_PORT}
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  use-hosts: true
+  default-nameserver:
+    - ${UPSTREAM_DNS}
+    - 1.1.1.1
+  nameserver:
+    - ${UPSTREAM_DNS}
+    - 223.5.5.5
+    - 1.1.1.1
+    - 8.8.8.8
+  fallback:
+    - 1.0.0.1
+    - 8.8.4.4
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "localhost.ptlogin2.qq.com"
+    - "*.msftconnecttest.com"
+    - "time.*"
+    - "time.*.*"
+    - "ntp.*"
+    - "*.ntp.org"
+    - "*.pool.ntp.org"
+
+${PROXIES_CONFIG}
+
+${PROXY_GROUPS_CONFIG}
+
+${PROXY_PROVIDERS}
+
+# ── 规则 ──
+rules:
+  - IP-CIDR,0.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,224.0.0.0/4,DIRECT,no-resolve
+  - IP-CIDR,240.0.0.0/4,DIRECT,no-resolve
+  - IP-CIDR6,::1/128,DIRECT,no-resolve
+  - IP-CIDR6,fc00::/7,DIRECT,no-resolve
+  - IP-CIDR6,fe80::/10,DIRECT,no-resolve
+  - MATCH,PROXY
+EOF
+
+    chown "$MIHOMO_USER":"$MIHOMO_USER" "${MIHOMO_DIR}/config.yaml"
+    chmod 640 "${MIHOMO_DIR}/config.yaml"
+
+    if [[ -n "$SUB_URL" ]]; then
+      echo "   ✅ 订阅已配置: $SUB_URL"
+      echo "   自动更新间隔: ${SUB_INTERVAL}秒 ($((SUB_INTERVAL / 3600)) 小时)"
+    fi
+
+    # 验证配置
+    if "${MIHOMO_BIN}" -t -d "${MIHOMO_DIR}" &>/dev/null; then
+      echo "   ✅ 配置验证通过"
+    else
+      echo "   ⚠️  配置验证失败，请检查 config.yaml"
+    fi
+
+    # 启动 mihomo 服务
+    cat > /etc/systemd/system/mihomo.service <<EOF
+[Unit]
+Description=Mihomo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${MIHOMO_USER}
+Group=${MIHOMO_USER}
+WorkingDirectory=${MIHOMO_DIR}
+ExecStart=${MIHOMO_BIN} -d ${MIHOMO_DIR}
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now mihomo.service
+    sleep 2
+  fi
+
+  echo "[2/3] 写入 iptables 规则..."
   backup_file /etc/default/mihomo-bypass
   cat > /etc/default/mihomo-bypass <<EOF
 LAN_IFACE=${LAN_IFACE}
@@ -317,6 +508,7 @@ disable_bypass() {
     /usr/local/sbin/mihomo-bypass-clear.sh
     systemctl stop mihomo-bypass.service 2>/dev/null || true
     systemctl disable mihomo-bypass.service 2>/dev/null || true
+    echo ""
     echo "✅ 旁路模式已关闭，所有流量恢复直连"
   else
     echo "⬜ 旁路模式未启用"
@@ -413,7 +605,7 @@ run_update() {
   if [[ "$UPDATE_NEKO" == "true" ]]; then
     echo "[2/2] 检查 Neko Master 更新..."
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "neko-master"; then
-      cd "$MIHOMO_DIR" 2>/dev/null || { echo "  ⚠️ 未找到 $MIHOMO_DIR"; exit 1; }
+      cd "$MIHOMO_DIR" 2>/dev/null || { echo "  ⚠️  未找到 $MIHOMO_DIR"; exit 1; }
       if docker compose pull neko-master 2>/dev/null; then
         docker compose up -d
         echo "  ✅ Neko Master 已更新"
